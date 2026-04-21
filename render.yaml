@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: slack-thread-sync
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python slack_thread_sync.py
+    plan: free          # upgrade to "starter" ($7/mo) for no sleep
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"       # ensures logs stream in real-time on Render dashboard
