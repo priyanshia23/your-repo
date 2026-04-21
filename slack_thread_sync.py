@@ -10,7 +10,7 @@ import time
 SLACK_TOKEN = "xoxb-1259594035652-10740645182023-sVPgUXYxX8gRElqYO2VsIkZ9"
 AIRTABLE_TOKEN = "patMhjMqmVkMf0Gpc.b42cc2035d97a186f37b0c8b0b96c008966e7fb3f9008c44771486d7721eaf85"
 BASE_ID = "apphLcvA4OO7gKjl9"
-TABLE_NAME = "Slack Thread Trails 2 copy"
+TABLE_NAME = "Slack Thread Trails 2 copy copy"
 DATABASE_TABLE = "Database"
 DATABASE_VIEW = "Grid view"
 BATCH_SIZE = 10
