@@ -1,22 +1,19 @@
-import requests
+import os
 import json
+import requests
 from datetime import datetime, timezone, timedelta
-import time
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
 
 # ==============================
-# CONFIG
+# CONFIG — set these as env vars on Render
 # ==============================
 
-SLACK_TOKEN = "xoxb-1259594035652-10740645182023-sVPgUXYxX8gRElqYO2VsIkZ9"
-AIRTABLE_TOKEN = "patMhjMqmVkMf0Gpc.b42cc2035d97a186f37b0c8b0b96c008966e7fb3f9008c44771486d7721eaf85"
-BASE_ID = "apphLcvA4OO7gKjl9"
-TABLE_NAME = "Slack Thread Trails 2 copy copy"
-DATABASE_TABLE = "Database"
-DATABASE_VIEW = "Grid view"
-BATCH_SIZE = 10
-
-# How often (in seconds) to re-poll for new messages during the day
-POLL_INTERVAL_SECONDS = 300  # every 5 minutes
+SLACK_TOKEN    = os.environ.get("SLACK_TOKEN", "xoxb-1259594035652-10740645182023-sVPgUXYxX8gRElqYO2VsIkZ9")
+AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN", "patMhjMqmVkMf0Gpc.b42cc2035d97a186f37b0c8b0b96c008966e7fb3f9008c44771486d7721eaf85")
+BASE_ID        = os.environ.get("AIRTABLE_BASE_ID", "apphLcvA4OO7gKjl9")
+TABLE_NAME     = os.environ.get("AIRTABLE_TABLE_NAME", "Slack Thread Trails 2 copy")
 
 SLACK_HEADERS = {"Authorization": f"Bearer {SLACK_TOKEN}"}
 AIRTABLE_HEADERS = {
@@ -27,37 +24,7 @@ AIRTABLE_HEADERS = {
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ==============================
-# GET TODAY'S MIDNIGHT IN IST → UTC UNIX TIMESTAMP
-# ==============================
-
-def get_today_start_ts():
-    """
-    Returns Unix timestamp for today 00:00:00 IST (converted to UTC).
-    This resets every calendar day in India.
-    """
-    now_ist = datetime.now(IST)
-    today_midnight_ist = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_midnight_utc = today_midnight_ist.astimezone(timezone.utc)
-    return today_midnight_utc.timestamp()
-
-
-# ==============================
-# DEDUPLICATION: TRACK SAVED THREADS IN MEMORY
-# ==============================
-
-# Key: (channel_id, thread_ts) → True
-# Prevents re-saving the same thread on repeat polls within the same run
-saved_threads = set()
-
-def is_already_saved(channel_id, thread_ts):
-    return (channel_id, thread_ts) in saved_threads
-
-def mark_as_saved(channel_id, thread_ts):
-    saved_threads.add((channel_id, thread_ts))
-
-
-# ==============================
-# CACHE FOR USER NAMES
+# USER NAME CACHE
 # ==============================
 
 user_cache = {}
@@ -88,52 +55,10 @@ def get_user_name(user_id):
 
 
 # ==============================
-# FETCH ALL CHANNELS FROM DATABASE TABLE
+# GET CHANNEL NAME
 # ==============================
 
-def fetch_all_channel_ids():
-    """
-    Reads ALL channel IDs from the Database table (isFetched or not).
-    For continuous sync, we want to poll ALL channels repeatedly,
-    not skip already-processed ones. isFetched logic is for one-time backfill.
-    Returns list of channel_id strings.
-    """
-    results = []
-    url = f"https://api.airtable.com/v0/{BASE_ID}/{DATABASE_TABLE}"
-    cursor = None
-
-    while True:
-        params = {
-            "pageSize": 100,
-            "fields[]": ["channelId"]
-        }
-        if cursor:
-            params["offset"] = cursor
-
-        res = requests.get(url, headers=AIRTABLE_HEADERS, params=params)
-        data = res.json()
-
-        if "records" not in data:
-            print("Airtable fetch error:", data)
-            break
-
-        for record in data["records"]:
-            channel_id = record.get("fields", {}).get("channelId", "").strip()
-            if channel_id:
-                results.append(channel_id)
-
-        cursor = data.get("offset")
-        if not cursor:
-            break
-
-    return results
-
-
-# ==============================
-# CHECK IF BOT IS MEMBER OF CHANNEL
-# ==============================
-
-def is_bot_in_channel(channel_id):
+def get_channel_name(channel_id):
     try:
         res = requests.get(
             "https://slack.com/api/conversations.info",
@@ -141,53 +66,11 @@ def is_bot_in_channel(channel_id):
             params={"channel": channel_id}
         )
         data = res.json()
-        if not data.get("ok"):
-            print(f"  ⚠️  conversations.info error for {channel_id}: {data.get('error')}")
-            return False
-        return data.get("channel", {}).get("is_member", False)
+        if data.get("ok"):
+            return data["channel"].get("name", channel_id)
     except Exception as e:
-        print(f"  ⚠️  Exception checking membership for {channel_id}: {e}")
-        return False
-
-
-# ==============================
-# GET MESSAGES IN CHANNEL FROM A GIVEN TIMESTAMP
-# ==============================
-
-def get_channel_messages(channel_id, from_ts):
-    messages = []
-    cursor = None
-
-    while True:
-        params = {
-            "channel": channel_id,
-            "oldest": from_ts,
-            "limit": 200
-        }
-        if cursor:
-            params["cursor"] = cursor
-
-        res = requests.get(
-            "https://slack.com/api/conversations.history",
-            headers=SLACK_HEADERS,
-            params=params
-        )
-        data = res.json()
-
-        if not data.get("ok"):
-            print(f"  History error for {channel_id}:", data.get("error"))
-            break
-
-        messages.extend(data.get("messages", []))
-
-        if not data.get("has_more"):
-            break
-
-        cursor = data.get("response_metadata", {}).get("next_cursor")
-        if not cursor:
-            break
-
-    return messages
+        print(f"Channel fetch error for {channel_id}:", e)
+    return channel_id
 
 
 # ==============================
@@ -203,13 +86,12 @@ def get_thread_replies(channel_id, thread_ts):
     data = res.json()
     if data.get("ok"):
         return data.get("messages", [])
-    else:
-        print(f"  Thread fetch error:", data.get("error"))
-        return []
+    print(f"Thread fetch error: {data.get('error')}")
+    return []
 
 
 # ==============================
-# BUILD SLACK LINK FOR THREAD
+# BUILD SLACK LINK
 # ==============================
 
 def build_slack_link(channel_id, thread_ts):
@@ -218,17 +100,16 @@ def build_slack_link(channel_id, thread_ts):
 
 
 # ==============================
-# BUILD CLEAN THREAD TRAIL
+# BUILD THREAD TRAIL RECORD
 # ==============================
 
-def build_thread_trail(channel_id, channel_name, root_message):
-    thread_ts = root_message.get("ts")
+def build_thread_trail(channel_id, channel_name, thread_ts):
+    replies = get_thread_replies(channel_id, thread_ts)
 
-    if root_message.get("reply_count", 0) > 0:
-        replies = get_thread_replies(channel_id, thread_ts)
-    else:
-        replies = [root_message]
+    if not replies:
+        return None
 
+    root_message = replies[0]
     trail = []
     all_participants = set()
     has_reactions = False
@@ -240,7 +121,7 @@ def build_thread_trail(channel_id, channel_name, root_message):
         all_participants.add(user_name)
 
         msg_ts = msg.get("ts")
-        msg_dt = datetime.utcfromtimestamp(float(msg_ts))
+        msg_dt = datetime.fromtimestamp(float(msg_ts), tz=IST)
 
         msg_reactions = []
         for reaction in msg.get("reactions", []):
@@ -261,7 +142,7 @@ def build_thread_trail(channel_id, channel_name, root_message):
 
         trail.append({
             "index": index + 1,
-            "datetime": msg_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "datetime": msg_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
             "senderId": user_id,
             "senderName": user_name,
             "text": msg.get("text", ""),
@@ -271,145 +152,129 @@ def build_thread_trail(channel_id, channel_name, root_message):
 
     root_user_id = root_message.get("user", "unknown")
     root_user_name = get_user_name(root_user_id)
-    root_ts = root_message.get("ts")
-    root_dt = datetime.utcfromtimestamp(float(root_ts))
-
-    slack_link = build_slack_link(channel_id, thread_ts)
+    root_dt = datetime.fromtimestamp(float(thread_ts), tz=IST)
 
     return {
         "channelId": channel_id,
         "channelName": channel_name,
         "threadId": thread_ts,
-        "slackLink": slack_link,
+        "slackLink": build_slack_link(channel_id, thread_ts),
         "threadDate": root_dt.strftime("%Y-%m-%d"),
         "dayOfWeek": root_dt.strftime("%A"),
         "initialMessage": root_message.get("text", ""),
         "initialSenderId": root_user_id,
         "initialSenderName": root_user_name,
-        "initialMessageTs": root_dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "initialMessageTs": root_dt.strftime("%Y-%m-%d %H:%M:%S IST"),
         "replyCount": max(len(replies) - 1, 0),
         "fullThreadTrail": json.dumps(trail, indent=2, ensure_ascii=False),
         "participants": ", ".join(all_participants),
         "hasReactions": has_reactions,
         "reactionsDetail": json.dumps(all_reactions, indent=2, ensure_ascii=False),
-        "extractedAt": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        "extractedAt": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     }
 
 
 # ==============================
-# SAVE TO AIRTABLE
+# FIND EXISTING AIRTABLE RECORD BY threadId
 # ==============================
 
-def save_to_airtable(record):
+def find_airtable_record(thread_id):
     url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}"
-    data = {"fields": record}
-    res = requests.post(url, json=data, headers=AIRTABLE_HEADERS)
-    if res.status_code == 200:
-        print(f"    ✅ Saved thread {record['threadId']} from #{record['channelName']}")
+    params = {
+        "filterByFormula": f'{{threadId}}="{thread_id}"',
+        "maxRecords": 1
+    }
+    res = requests.get(url, headers=AIRTABLE_HEADERS, params=params)
+    data = res.json()
+    records = data.get("records", [])
+    if records:
+        return records[0]["id"]
+    return None
+
+
+# ==============================
+# UPSERT TO AIRTABLE (create or update)
+# ==============================
+
+def upsert_to_airtable(record):
+    thread_id = record["threadId"]
+    existing_record_id = find_airtable_record(thread_id)
+
+    if existing_record_id:
+        url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}/{existing_record_id}"
+        res = requests.patch(url, json={"fields": record}, headers=AIRTABLE_HEADERS)
+        if res.status_code == 200:
+            print(f"  🔄 Updated thread {thread_id} in #{record['channelName']}")
+        else:
+            print(f"  ❌ Update error: {res.status_code}", res.json())
     else:
-        print(f"    ❌ Airtable error: {res.status_code}", res.json())
+        url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_NAME}"
+        res = requests.post(url, json={"fields": record}, headers=AIRTABLE_HEADERS)
+        if res.status_code == 200:
+            print(f"  ✅ Created thread {thread_id} in #{record['channelName']}")
+        else:
+            print(f"  ❌ Create error: {res.status_code}", res.json())
 
 
 # ==============================
-# PROCESS ALL CHANNELS ONCE
+# SLACK WEBHOOK ENDPOINT
 # ==============================
 
-def process_all_channels(channel_ids, from_ts):
-    new_count = 0
-    skipped_not_member = 0
-    skipped_no_messages = 0
+@app.route("/slack/events", methods=["POST"])
+def slack_events():
+    data = request.json
 
-    for channel_id in channel_ids:
-        print(f"\n  Checking channel {channel_id} ...")
+    # Slack URL verification challenge (one-time on setup)
+    if data.get("type") == "url_verification":
+        return jsonify({"challenge": data["challenge"]})
 
-        if not is_bot_in_channel(channel_id):
-            print(f"  ⛔ Bot not in channel {channel_id} — skipping")
-            skipped_not_member += 1
-            time.sleep(0.3)
-            continue
+    event = data.get("event", {})
+    event_type = event.get("type")
 
-        messages = get_channel_messages(channel_id, from_ts)
+    # Only handle message events
+    if event_type not in ("message", "message_replied"):
+        return jsonify({"status": "ignored"})
 
-        if not messages:
-            skipped_no_messages += 1
-            continue
+    # Skip bot messages, edits, deletes
+    subtype = event.get("subtype")
+    if subtype in ("bot_message", "message_changed", "message_deleted"):
+        return jsonify({"status": "ignored"})
 
-        print(f"  Found {len(messages)} messages")
+    channel_id = event.get("channel")
+    if not channel_id:
+        return jsonify({"status": "no channel"})
 
-        for root_msg in messages:
-            if root_msg.get("subtype"):
-                continue
+    # For replies, thread_ts points to root. For root messages, use ts.
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    if not thread_ts:
+        return jsonify({"status": "no ts"})
 
-            thread_ts = root_msg.get("ts")
+    print(f"\n📨 Event: {event_type} | Channel: {channel_id} | Thread: {thread_ts}")
 
-            # Skip if we already saved this thread in this run
-            if is_already_saved(channel_id, thread_ts):
-                continue
+    channel_name = get_channel_name(channel_id)
+    trail = build_thread_trail(channel_id, channel_name, thread_ts)
 
-            trail = build_thread_trail(channel_id, channel_id, root_msg)
-            if trail:
-                save_to_airtable(trail)
-                mark_as_saved(channel_id, thread_ts)
-                new_count += 1
+    if trail:
+        upsert_to_airtable(trail)
+    else:
+        print(f"  ⚠️  Could not build thread trail for {thread_ts}")
 
-            time.sleep(0.5)
-
-        time.sleep(0.5)
-
-    return new_count, skipped_not_member, skipped_no_messages
+    return jsonify({"status": "ok"})
 
 
 # ==============================
-# MAIN RUNNER — CONTINUOUS DAILY SYNC
+# HEALTH CHECK
 # ==============================
 
-def run():
-    print("=== Slack Thread Sync — Continuous Daily Mode ===")
-    print(f"Timezone: IST (UTC+5:30)")
-    print(f"Poll interval: every {POLL_INTERVAL_SECONDS // 60} minutes\n")
+@app.route("/", methods=["GET"])
+def health():
+    return jsonify({"status": "running"})
 
-    # Load all channel IDs once at startup (re-fetched each new day)
-    print("Loading all channel IDs from Airtable Database table...")
-    channel_ids = fetch_all_channel_ids()
-    print(f"Loaded {len(channel_ids)} channels.\n")
 
-    last_day = None  # track IST calendar day to reset at midnight
-
-    poll_number = 0
-
-    while True:
-        now_ist = datetime.now(IST)
-        today_ist_str = now_ist.strftime("%Y-%m-%d")
-
-        # ─── NEW DAY: reset deduplication set + reload channels ───
-        if today_ist_str != last_day:
-            print(f"\n{'='*50}")
-            print(f"📅 New IST day detected: {today_ist_str}")
-            print(f"  Resetting deduplication cache and reloading channels...")
-            saved_threads.clear()
-            channel_ids = fetch_all_channel_ids()
-            print(f"  Loaded {len(channel_ids)} channels.\n")
-            last_day = today_ist_str
-
-        from_ts = get_today_start_ts()
-        poll_number += 1
-
-        print(f"\n{'─'*50}")
-        print(f"🔄 Poll #{poll_number} — {now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}")
-        print(f"   Fetching messages from midnight IST ({datetime.utcfromtimestamp(from_ts).strftime('%Y-%m-%d %H:%M:%S')} UTC)")
-        print(f"   Channels to scan: {len(channel_ids)}")
-
-        new_count, skip_member, skip_msgs = process_all_channels(channel_ids, from_ts)
-
-        print(f"\n  ✅ Poll #{poll_number} complete")
-        print(f"     New threads saved       : {new_count}")
-        print(f"     Skipped (not member)    : {skip_member}")
-        print(f"     Skipped (no messages)   : {skip_msgs}")
-        print(f"     Total in-memory tracked : {len(saved_threads)}")
-        print(f"\n  ⏳ Next poll in {POLL_INTERVAL_SECONDS // 60} minutes...")
-
-        time.sleep(POLL_INTERVAL_SECONDS)
-
+# ==============================
+# ENTRY POINT
+# ==============================
 
 if __name__ == "__main__":
-    run()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
