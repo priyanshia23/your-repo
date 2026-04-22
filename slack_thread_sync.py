@@ -13,7 +13,7 @@ app = Flask(__name__)
 SLACK_TOKEN    = os.environ.get("SLACK_TOKEN", "xoxb-1259594035652-10740645182023-sVPgUXYxX8gRElqYO2VsIkZ9")
 AIRTABLE_TOKEN = os.environ.get("AIRTABLE_TOKEN", "patMhjMqmVkMf0Gpc.b42cc2035d97a186f37b0c8b0b96c008966e7fb3f9008c44771486d7721eaf85")
 BASE_ID        = os.environ.get("AIRTABLE_BASE_ID", "apphLcvA4OO7gKjl9")
-TABLE_NAME     = os.environ.get("AIRTABLE_TABLE_NAME", "Slack Thread Trails 2 copy")
+TABLE_NAME     = os.environ.get("AIRTABLE_TABLE_NAME", "Slack Thread Trails 2 copy copy")
 
 SLACK_HEADERS = {"Authorization": f"Bearer {SLACK_TOKEN}"}
 AIRTABLE_HEADERS = {
