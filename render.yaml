@@ -1,10 +1,18 @@
 services:
-  - type: worker
+  - type: web                          # must be "web" to receive HTTP requests from Slack
     name: slack-thread-sync
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python slack_thread_sync.py
-    plan: free          # upgrade to "starter" ($7/mo) for no sleep
+    startCommand: gunicorn slack_thread_sync:app
+    plan: free                         # upgrade to "starter" ($7/mo) for no sleep
     envVars:
       - key: PYTHONUNBUFFERED
-        value: "1"       # ensures logs stream in real-time on Render dashboard
+        value: "1"
+      - key: SLACK_TOKEN
+        sync: false                    # set manually in Render dashboard
+      - key: AIRTABLE_TOKEN
+        sync: false                    # set manually in Render dashboard
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: AIRTABLE_TABLE_NAME
+        sync: false
